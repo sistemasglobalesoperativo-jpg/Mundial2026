@@ -620,9 +620,10 @@ function renderResults(matches) {
     return;
   }
   var SM = {
-    LIVE: {cls:'s-live', lbl:'\u25CF LIVE'},
+    LIVE: {cls:'s-live', lbl:'\u25CF EN VIVO'},
     FT:   {cls:'s-ft',   lbl:'Final'},
     HT:   {cls:'s-ht',   lbl:'M.Tiempo'},
+    HOY:  {cls:'s-soon', lbl:'\u2022 Hoy'},
     SOON: {cls:'s-soon', lbl:'Pr\u00f3ximo'},
   };
   /* Mostrar máx. 5 partidos en 220px de alto */
@@ -681,56 +682,71 @@ function updateCountdown() {
    Formato: { rounds: [ { matches: [ { team1, team2, score1, score2, date, time } ] } ] }
    ────────────────────────────────────────────────────────── */
 function parseOpenFootball(data) {
-  var results = [];
-  var upcoming = [];
-  var now = Date.now();
+  var all  = [];
+  var now  = Date.now();
+  var todayStr = new Date().toISOString().substring(0,10);
 
   var rounds = data.rounds || [];
   for (var r = 0; r < rounds.length; r++) {
     var ms = rounds[r].matches || [];
     for (var m = 0; m < ms.length; m++) {
       var g = ms[m];
-      /* Parsear fecha/hora */
-      var dtStr = g.date + 'T' + (g.time || '00:00') + ':00Z';
-      var dt = new Date(dtStr);
-      var isFinished = (g.score1 !== null && g.score1 !== undefined);
-      var isLive     = isFinished && Math.abs(dt - now) < 2*3600*1000;
-      var isFuture   = dt > now;
 
-      var t1name = typeof g.team1 === 'object' ? (g.team1.name || '') : (g.team1 || '');
-      var t2name = typeof g.team2 === 'object' ? (g.team2.name || '') : (g.team2 || '');
+      /* ─ Parsear hora: soporta "19:00", "13:00 UTC-6" ─ */
+      var rawTime = (g.time || '12:00').toString().trim();
+      var timeOnly = rawTime.replace(/\s*UTC[+-]\d+/i,'').trim();
+      var offMatch = rawTime.match(/UTC([+-]\d+)/i);
+      var offHrs   = offMatch ? parseInt(offMatch[1]) : 0;
+      var dtStr    = g.date + 'T' + (timeOnly.length===5 ? timeOnly : '12:00') + ':00Z';
+      var dt       = new Date(new Date(dtStr).getTime() - offHrs*3600000);
 
-      var entry = {
-        h:  { n: t1name, f: getFlag(t1name) },
-        a:  { n: t2name, f: getFlag(t2name) },
-        hs: isFinished ? g.score1 : null,
-        as: isFinished ? g.score2 : null,
-        st: isLive ? 'LIVE' : isFinished ? 'FT' : 'SOON',
-        min: null,
-        dt: dtStr,
-        venue: g.group ? 'Grupo ' + g.group : (g.ground || ''),
-      };
-      if (isFuture) upcoming.push(entry);
-      else results.push(entry);
+      /* ─ Nombre de equipos (string o objeto) ─ */
+      var t1 = typeof g.team1==='object' ? (g.team1.name||g.team1.key||'') : (g.team1||'');
+      var t2 = typeof g.team2==='object' ? (g.team2.name||g.team2.key||'') : (g.team2||'');
+      if (!t1 || !t2) continue;
+
+      /* ─ Estado ─ */
+      var hasScore = (g.score1 !== null && g.score1 !== undefined);
+      var diffMs   = now - dt.getTime();
+      var isToday  = (g.date === todayStr);
+      var isLive   = isToday && diffMs>0 && diffMs<7200000 && !hasScore;
+      var isFuture = dt.getTime() > now;
+      var status;
+      if (isLive)         status = 'LIVE';
+      else if (hasScore)  status = 'FT';
+      else if (isToday)   status = 'HOY';
+      else if (isFuture)  status = 'SOON';
+      else                status = 'FT';
+
+      all.push({
+        h: {n:t1, f:getFlag(t1)}, a: {n:t2, f:getFlag(t2)},
+        hs: hasScore ? g.score1 : null, as: hasScore ? g.score2 : null,
+        st: status, min: null,
+        dt: dt.toISOString(), ts: dt.getTime(),
+        venue: (g.group?'Grupo '+g.group:'')+(g.ground?' \u2022 '+g.ground:''),
+        isToday: isToday, isFuture: isFuture,
+      });
     }
   }
 
-  /* Últimos 5 resultados + en curso primero */
-  var live   = results.filter(function(x){ return x.st==='LIVE'; });
-  var done   = results.filter(function(x){ return x.st!=='LIVE'; }).reverse();
-  var merged = live.concat(done).slice(0, 5);
+  all.sort(function(a,b){return a.ts-b.ts;});
+  var live   = all.filter(function(x){return x.st==='LIVE';});
+  var today  = all.filter(function(x){return x.isToday && x.st!=='LIVE';});
+  var past   = all.filter(function(x){return !x.isFuture && x.st!=='LIVE' && !x.isToday;}).reverse();
+  var future = all.filter(function(x){return x.isFuture && !x.isToday;});
 
-  /* Próximo partido */
+  /* Panel: vivos + hoy + recientes. Si nada, mostrar próximos */
+  var showResults = live.concat(today).concat(past).slice(0,5);
+  if (showResults.length===0) showResults = future.slice(0,5);
+
+  /* Próximo sin empezar */
   var nextMatch = null;
-  if (upcoming.length) {
-    var nx = upcoming[0];
-    nextMatch = {
-      h: nx.h, a: nx.a,
-      dt: nx.dt,
-      venue: nx.venue,
-    };
-  }
-  return { results: merged, next: nextMatch };
+  var cands = all.filter(function(x){return x.st==='SOON'||x.st==='HOY'||x.isFuture;});
+  cands.sort(function(a,b){return a.ts-b.ts;});
+  if (cands.length)      nextMatch = {h:cands[0].h, a:cands[0].a, dt:cands[0].dt, venue:cands[0].venue};
+  else if (live.length)  nextMatch = {h:live[0].h,  a:live[0].a,  dt:live[0].dt,  venue:live[0].venue};
+
+  return {results:showResults, next:nextMatch};
 }
 
 /* ── FETCH / DEMO ───────────────────────────────────────────*/
